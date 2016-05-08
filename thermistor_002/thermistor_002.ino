@@ -21,6 +21,7 @@ int samples[NUMSAMPLES];
 float minread = 1024.0;
 float maxread = 0.0;
 
+// Set the desired room temperature to 70 degrees F (and convert to C)
 float desiredTempC = (70.0 - 32.0) * 5 / 9;
 
 // Potential states of the damper
@@ -42,7 +43,16 @@ int consecutiveRequestsForClose = 0;
 // Time at which the damper was last instructed to change
 unsigned long damperChangeStart = 0;
 
-int lastAction = 0; // 0 = Unknown, 1 = HEAT, 2 = AC
+// HVAC actions that are observed
+#define ACTION_UNKNOWN 0
+#define ACTION_HEAT 1
+#define ACTION_AC 2
+int lastAction = ACTION_UNKNOWN;
+
+// number of degrees C that the duct temp must exceed the desired room temp
+// to be considered worth opening the duct
+#define DUCT_TEMP_THRESHOLD 5
+
 // Turn on auxiliar heat? (0 = no, 1 = yes)
 int auxHeat = 0;
 
@@ -72,17 +82,32 @@ int readVcc()
   return (result);
 }
 
-void CloseDamper()
+void closeDamper()
 {
   digitalWrite(DAMPER_RELAY_PIN, HIGH);
 }
 
-void OpenDamper()
+void openDamper()
 {
   digitalWrite(DAMPER_RELAY_PIN, LOW);
 }
 
-void setup(void) {
+void damperControl(int newDamperState)
+{
+  damperControl(newDamperState, 0);
+}
+
+void damperControl(int newDamperState, int actionObserved)
+{
+  damperState = newDamperState;
+
+  newDamperState == DAMPER_OPEN ? openDamper() : closeDamper();
+  if (actionObserved != 0) lastAction = actionObserved;
+  damperChangeStart = millis();
+}
+
+void setup(void)
+{
   Serial.begin(9600);
   analogReference(EXTERNAL);
   // Set the damper relay pin to output and set it HIGH, which means closed/off
@@ -103,10 +128,10 @@ void turnDebugLightOff()
       digitalWrite(13, LOW);
 }
 
-void loop(void) {
-  unsigned long loopStart = millis();
-  Serial.println(damperState == DAMPER_OPEN ? "DAMPER OPEN" : "DAMPER CLOSED");
-
+float getDuctTemp()
+{
+  // reading the duct termistor can be noisy
+  // so grab a few samples and average them
   uint8_t i;
   float average;
 
@@ -125,41 +150,41 @@ void loop(void) {
   if (average < minread) minread = average;
   if (average > maxread) maxread = average;
 
-
   // convert the value to resistance
   average = 1023 / average - 1;
   average = SERIESRESISTOR / average;
 
+  // compute the temperature via Steinhart-Hart equation
   float steinhart;
   steinhart = average / THERMISTORNOMINAL;     // (R/Ro)
   steinhart = log(steinhart);                  // ln(R/Ro)
   steinhart /= BCOEFFICIENT;                   // 1/B * ln(R/Ro)
   steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
   steinhart = 1.0 / steinhart;                 // Invert
-  steinhart -= 273.15;                         // convert to C
+  steinhart -= 273.15;                         // convert from K to C
 
+  return steinhart;
+}
 
+float getRoomTemp()
+{
   float vcc = readVcc() / 1000.0f;
 
-  average = analogRead(TMPPIN);
-  float voltage = (average / 1024.0) * vcc;
+  float reading = analogRead(TMPPIN);
+  float voltage = (reading / 1024.0) * vcc;
 
-  float roomTempC = (voltage - .5) * 100 + .5;
+  return (voltage - .5) * 100 + .5;
+}
+
+void loop(void)
+{
+  unsigned long loopStart = millis();
+
+  float ductTempC = getDuctTemp();
+
+  float roomTempC = getRoomTemp();
   float roomTempF = roomTempC * 9 / 5 + 32;
 
-  Serial.print(roomTempF);
-  Serial.print(" [");
-  Serial.print(desiredTempC * 9 / 5 + 32);
-  Serial.print("/");
-  Serial.print(steinhart * 9 / 5 + 32);
-  Serial.print("] ");
-  if (auxHeat || (millis() - auxOnStart) < MIN_AUX_TIME) Serial.print(" AUX ");
-  if (damperState == DAMPER_UNKNOWN) Serial.print("Unknown");
-  if (damperState == DAMPER_OPEN) Serial.print("Open");
-  if (damperState == DAMPER_CLOSED) Serial.print("Closed");
-  if (lastAction == 0) Serial.print(" ---- ");
-  else if (lastAction == 1) Serial.print(" HEAT ");
-  else Serial.print(" COOL ");
   auxHeat = 0;
   if ((millis() - damperChangeStart) >= MIN_DAMPER_STATE_CHANGE)
   {
@@ -174,72 +199,42 @@ void loop(void) {
           auxOnStart = millis();
         }
       } else auxCount = 0;
-      if ((steinhart > roomTempC + 5) && ((damperState == DAMPER_CLOSED) || (damperState == DAMPER_UNKNOWN)))
+      if ((ductTempC > roomTempC + DUCT_TEMP_THRESHOLD) && ((damperState == DAMPER_CLOSED) || (damperState == DAMPER_UNKNOWN)))
       {
         consecutiveRequestsForOpen++;
         if (consecutiveRequestsForOpen == CONSECUTIVE_REQUESTS_REQUIRED)
-        {
-          damperState = DAMPER_OPEN;
-          OpenDamper();
-          damperChangeStart = millis();
-          lastAction = 1;
-          Serial.println(" Open the damper!");
-        } else Serial.println(consecutiveRequestsForOpen);
+          damperControl(DAMPER_OPEN, ACTION_HEAT);
       }
-      else if ((steinhart <= roomTempC + 5) && ((damperState == DAMPER_OPEN) || (damperState == DAMPER_UNKNOWN)))
+      else if ((ductTempC <= roomTempC + DUCT_TEMP_THRESHOLD) && ((damperState == DAMPER_OPEN) || (damperState == DAMPER_UNKNOWN)))
       {
         consecutiveRequestsForClose++;
         if (consecutiveRequestsForClose == CONSECUTIVE_REQUESTS_REQUIRED)
-        {
-          damperState = DAMPER_CLOSED;
-          CloseDamper();
-          damperChangeStart = millis();
-          Serial.println(" Close the damper!");
-        } else Serial.println(consecutiveRequestsForClose);
+          damperControl(DAMPER_CLOSED);
       }
       else
-      {
-        Serial.println("");
         consecutiveRequestsForOpen = consecutiveRequestsForClose = 0;
-      }
     }
     else
     {
-      if ((steinhart < roomTempC - 5) && ((damperState == DAMPER_CLOSED) || (damperState == DAMPER_UNKNOWN)))
+      if ((ductTempC < roomTempC - DUCT_TEMP_THRESHOLD) && ((damperState == DAMPER_CLOSED) || (damperState == DAMPER_UNKNOWN)))
       {
         consecutiveRequestsForOpen++;
         if (consecutiveRequestsForOpen == CONSECUTIVE_REQUESTS_REQUIRED)
-        {
-          damperState = DAMPER_OPEN;
-          OpenDamper();
-          damperChangeStart = millis();
-          lastAction = 2;
-          Serial.println(" Open the damper!");
-        } else Serial.println(consecutiveRequestsForOpen);
+          damperControl(DAMPER_OPEN, ACTION_AC);
       }
-      else if ((steinhart >= roomTempC - 5) && (damperState == DAMPER_OPEN) || (damperState == DAMPER_UNKNOWN))
+      else if ((ductTempC >= roomTempC - DUCT_TEMP_THRESHOLD) && (damperState == DAMPER_OPEN) || (damperState == DAMPER_UNKNOWN))
       {
         consecutiveRequestsForClose++;
         if (consecutiveRequestsForClose == CONSECUTIVE_REQUESTS_REQUIRED)
-        {
-          damperState = DAMPER_CLOSED;
-          CloseDamper();
-          damperChangeStart = millis();
-          Serial.println(" Close the damper!");
-        } else Serial.println(consecutiveRequestsForClose);
+          damperControl(DAMPER_CLOSED);
       }
       else
-      {
-        Serial.println("");
         consecutiveRequestsForOpen = consecutiveRequestsForClose = 0;
-      }
     }
   }
   else
-  {
     consecutiveRequestsForOpen = consecutiveRequestsForClose = 0;
-    Serial.println("");
-  }
+
   unsigned long loopExecutionTime = millis() - loopStart;
   if (loopExecutionTime < 1000) delay(1000 - loopExecutionTime);
 }
