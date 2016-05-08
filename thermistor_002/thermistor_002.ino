@@ -34,16 +34,25 @@ float desiredTempC = (70.0 - 32.0) * 5 / 9;
 // the current damper state
 int damperState = DAMPER_UNKNOWN;
 
+// Hysteresis -- number of positive, consecutive reading required before treated as fact
 #define CONSECUTIVE_REQUESTS_REQUIRED 6
 int consecutiveRequestsForOpen = 0;
 int consecutiveRequestsForClose = 0;
 
+// Time at which the damper was last instructed to change
 unsigned long damperChangeStart = 0;
 
-int lastAction = 0; // 0 = Unknonw, 1 = HEAT, 2 = AC
+int lastAction = 0; // 0 = Unknown, 1 = HEAT, 2 = AC
+// Turn on auxiliar heat? (0 = no, 1 = yes)
 int auxHeat = 0;
+
+// Hysteresis -- number of positive, consecutive readings  requesting aux heat
 int auxCount = 0;
+
+// Minimum amount of time to keep aux hear on (to combat bouncing)
 #define MIN_AUX_TIME (60L*1000L)
+
+// Time at which aux heat was turned on
 unsigned long auxOnStart = 0L;
 
 int readVcc()
@@ -79,6 +88,7 @@ void setup(void) {
   // Set the damper relay pin to output and set it HIGH, which means closed/off
   pinMode(DAMPER_RELAY_PIN, OUTPUT);
   digitalWrite(DAMPER_RELAY_PIN, HIGH);
+  // Prepare the debug LED
   pinMode(13, OUTPUT);
   digitalWrite(13, LOW);
 }
