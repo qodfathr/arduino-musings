@@ -1,3 +1,11 @@
+// Once we add the touchscreen, it needs:
+// Digital 4, 9-13
+// Analog 4-5
+
+// This means we need to nix the debug light (or wire a new one)
+// and move a couple of the other pins
+
+
 // which analog pin to connect
 #define THERMISTORPIN A0
 // resistance at 25 degrees C
